@@ -16,6 +16,7 @@ from torch.utils.data import (DataLoader, RandomSampler, SequentialSampler,Tenso
 from utils import Regularization
 from pytorch_transformers import (GPT2LMHeadModel, GPT2Tokenizer,GPT2Config,AdamW, cached_path, WEIGHTS_NAME, CONFIG_NAME, WarmupLinearSchedule)
 import apex
+from utils_squad_GPT-2 import read_squad_examples
 
 
 
@@ -25,66 +26,21 @@ logging.basicConfig(
     datefmt='%m/%d/%Y %H:%M:%S',
     level=logging.INFO)
 logger = logging.getLogger(__name__)
-
-def longest_length(model):
-    max_length = model.config.n_positions - 100 - 4
-    q_length = 50
-    a_length = 50
-    return max_length, q_length, a_length
-
-def load_squad_dataset(path, cache=True,using_pickle=False):
-    """generate data point for QA dataset"""
-    """ a list of tuples(story, question, answer, ID)"""
-    if using_pickle:
-        data_list = pickle.load(open(path+".cached.p","rb"))
-        return data_list
+def load_and_cache_example(args, tokenizer, evaluate=False, output_example=False)
+    # Load data features from cache or dataset file
+    input_file = args.predict_file if evaluate else args.train_file
+    cached_features_file = os.path.join(os.path.dirname(input_file), 'cached_{}_{}_{}'.format(
+        'dev' if evaluate else 'train',
+        list(filter(None, args.model_name_or_path.split('/'))).pop(),
+        str(args.max_seq_length)))
+    if os.path.exists(cached_features_file) and not args.overwrite_cache and not output_examples:
+        logger.info("Loading features from cached file %s", cached_features_file)
+        features = torch.load(cached_features_file)
     else:
-        data = json.load(open(path,"r"))
-        data_list = list()
-        start = time.time()
-        for each_data in tqdm(data["data"]):
-            for qas_paragraph in each_data['paragraphs']:
-                context = qas_paragraph['context']
-                for qas in qas_paragraph['qas']:
-                    question = qas['question']
-                    ID = qas['id']
-                    try:
-                        if qas['is_impossible'] == False:
-                            answer = qas['answers'][0]['text']
-                        else:
-                            answer = ""
-                    except:
-                        answer = qas['answers'][0]['text']
-                    data_list+=[(context, question, answer, {ID})]
-        end = time.time()
-        if cache:
-            if not os.path.exists(path+".cached.p"):
-                pickle.dump(data_list,open(dataset_path+".cached.p","wb"))
-        return data_list
-
-def pre_process_datasets(datasets,input_len,story_token,question_token,ans_token,end_token,pad_token):
-    """ Pre-process datasets containing lists of tuples(story, 1st continuation, 2nd continuation, label)
-
-        To Transformer inputs of shape (n_batch, n_alternative, length) comprising for each batch, continuation:
-        input_ids[batch, :] = [story_token] + story[:story_length] + [question_token] + question[:que_length] +[end_token]"""
-    tensor_datasets = []
-    for dataset in datasets:
-        n_batch = len(dataset)
-        input_ids = np.zeros((n_batch,input_len),dtype=np.int64)
-        lm_labels = np.full((n_batch,input_len),fill_value=-1,dtype=np.int64)
-        for i , (story,question,ans, ID) in enumerate(dataset):
-            cannot_calculate_loss = len([story_token] + story + [question_token] + question)
-            text=[story_token] + story + [question_token] + question + [ans_token] + ans + [end_token]
-            only_need_length = len(text)
-            input_ids[i,:only_need_length] = text
-            lm_labels[i,:only_need_length] = text
-            input_ids[i,only_need_length:] = pad_token
-            lm_labels[i,:cannot_calculate_loss] = -1
-            
-        all_inputs = (input_ids, lm_labels)
-        tensor_datasets+= [tuple(torch.tensor(t) for t in all_inputs)]
-    return tensor_datasets
-
+        logger.info("Creating features from dataset file at %s", input_file)
+        examples = read_squad_examples(input_file=input_file,
+                                                is_training=not evaluate,
+                                                version_2_with_negative=args.version_2_with_negative
 
 def random_seed_setup(args):
     random.seed(args.seed)
@@ -127,6 +83,10 @@ def main():
     parser.add_argument('--old_batch_size', type=int, default=2)
     parser.add_argument("--adam_epsilon", default=1e-8, type=float,help="Epsilon for Adam optimizer.")
     parser.add_argument('--max_grad_norm', type=int, default=1)
+    #training augment-------------------------------------
+    parser.add_argument('--doc_length',type=int,default=996)
+    parser.add_argument('--doc_stride',type=int,default=128)
+    #-----------------------------------------------------
     parser.add_argument("--max_steps", default=-1, type=int,
                         help="If > 0: set total number of training \
                         steps to perform. Override num_train_epochs.")
@@ -158,26 +118,11 @@ def main():
     model = GPT2LMHeadModel.from_pretrained(args.model_name)
     model.resize_token_embeddings(len(tokenizer))
     model.to(device)
-
-    train_dataset = load_squad_dataset(args.train_dataset,using_pickle=args.using_cache)
-    old_dataset = load_squad_dataset(args.old_dataset,using_pickle=args.using_cache)
-    dataset = (train_dataset,old_dataset)
-    def tokenize_and_encode(obj):
-        """ Tokenize and encode a nested object """
-        if isinstance(obj, str):
-            return tokenizer.convert_tokens_to_ids(tokenizer.tokenize(obj))
-        elif isinstance(obj, set):
-            return obj
-        return list(tokenize_and_encode(o) for o in obj)
-        
-    encoded_datasets = tokenize_and_encode(dataset)
     
-    max_length, q_length, a_length = longest_length(model)
-
-    input_length = max(len(story[:max_length]) + len(question[:q_length]) + len(ans[:a_length]) + 5  \
-                            for dataset in encoded_datasets for story, question, ans, _ in dataset)
-    input_length = min(input_length, model.config.n_positions)  # Max size of input for the pre-trained model
-    tensor_datasets = pre_process_datasets(encoded_datasets, input_length,*special_tokens_ids)
+    #processing dataset
+    
+    
+    
     train_data = TensorDataset(*tensor_datasets[0])
     old_data = TensorDataset(*tensor_datasets[1])
     train_sampler = RandomSampler(train_data)
@@ -211,7 +156,7 @@ def main():
         model.train()
         if args.do_LLL != "":
             importance = args.importance
-            Reg = Regularization(model=model,mode="EWC",dataloader=old_dataloader,device=device,optimizer=optimizer)
+            Reg = Regularization(model=model,mode="EWC",dataloader=old_dataloader,device=device)
         step_step = 1
         for _ in trange(int(args.num_train_epochs), desc="Epoch"):
             tr_loss = 0
@@ -225,12 +170,10 @@ def main():
                     loss = losses[0] + importance * Reg.penalty(model)
                 else:
                     loss = losses[0]
-
                 if args.fp16:
                     with amp.scale_loss(loss, optimizer) as scaled_loss:
                         scaled_loss.backward()
-                    torch.nn.utils.clip_grad_norm_(model.parameters(), args.max_grad_norm)
-                
+                    torch.nn.utils.clip.grad_norm_(amp.master_params(optimizer), args.max_grad_norm)
                 else:
                     loss.backward()
                     torch.nn.utils.clip_grad_norm_(model.parameters(), args.max_grad_norm)
@@ -249,6 +192,7 @@ def main():
     if args.do_train:
         # Save a trained model, configuration and tokenizer
         model_to_save = model.module if hasattr(model, 'module') else model  # Only save the model it-self
+        
         # If we save using the predefined names, we can load using `from_pretrained`
         output_model_file = os.path.join(args.output_dir, WEIGHTS_NAME)
         output_config_file = os.path.join(args.output_dir, CONFIG_NAME)
