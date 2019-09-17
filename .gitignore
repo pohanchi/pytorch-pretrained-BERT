@@ -54,6 +54,11 @@ coverage.xml
 *.mo
 *.pot
 
+# Pickle
+*.bin
+*.json
+*.p
+
 # Django stuff:
 *.log
 local_settings.py
