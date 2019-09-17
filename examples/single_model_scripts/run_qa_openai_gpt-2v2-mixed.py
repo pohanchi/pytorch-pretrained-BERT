@@ -15,6 +15,10 @@ from tensorboardX import SummaryWriter
 from torch.utils.data import (DataLoader, RandomSampler, SequentialSampler,TensorDataset)
 from utils import Regularization
 from pytorch_transformers import (GPT2LMHeadModel, GPT2Tokenizer,GPT2Config,AdamW, cached_path, WEIGHTS_NAME, CONFIG_NAME, WarmupLinearSchedule)
+import apex
+
+
+
 
 logging.basicConfig(
     format='%(asctime)s - %(levelname)s - %(name)s -   %(message)s',
@@ -28,36 +32,11 @@ def longest_length(model):
     a_length = 50
     return max_length, q_length, a_length
 
-
 def load_squad_dataset(path, cache=True,using_pickle=False):
     """generate data point for QA dataset"""
     """ a list of tuples(story, question, answer, ID)"""
-    if using_pickle:
-        data_list = pickle.load(open(path+".cached.p","rb"))
-        return data_list
-    else:
-        data = json.load(open(path,"r"))
-        data_list = list()
-        start = time.time()
-        for each_data in tqdm(data["data"]):
-            for qas_paragraph in each_data['paragraphs']:
-                context = qas_paragraph['context']
-                for qas in qas_paragraph['qas']:
-                    question = qas['question']
-                    ID = qas['id']
-                    try:
-                        if qas['is_impossible'] == False:
-                            answer = qas['answers'][0]['text']
-                        else:
-                            answer = " "
-                    except:
-                        answer = qas['answers'][0]['text']
-                    data_list+=[(context, question, answer, {ID})]
-        end = time.time()
-        if cache:
-            if not os.path.exists(path+".cached.p"):
-                pickle.dump(data_list,open(dataset_path+".cached.p","wb"))
-        return data_list
+    data_list = pickle.load(open(path,"rb"))    
+    return data_list
 
 def pre_process_datasets(datasets,input_len,story_token,question_token,ans_token,end_token,pad_token):
     """ Pre-process datasets containing lists of tuples(story, 1st continuation, 2nd continuation, label)
@@ -104,7 +83,6 @@ def process_special_tokens():
     special_tokens_ids = list(tokenizer.convert_tokens_to_ids(token) for token in special_tokens)
     return  tokenizer,special_tokens_ids,special_tokens
     
-
 def main():
     config = GPT2Config.from_pretrained('gpt2')
     parser = argparse.ArgumentParser()
@@ -138,7 +116,10 @@ def main():
     parser.add_argument('--weight_decay', type=float, default=0.01)
     parser.add_argument('--lm_coef', type=float, default=0.9)
     parser.add_argument('--n_valid', type=int, default=374)
-    parser.add_argument('--fp16',action="store_true")
+    parser.add_argument("--fp16", action='store_true',help="accerlate the model")
+    parser.add_argument('--fp16_opt_level', type=str, default='O1',
+                        help="For fp16: Apex AMP optimization level selected in ['O0', 'O1', 'O2', and 'O3']."
+                             "See details at https://nvidia.github.io/apex/amp.html")
     args = parser.parse_args()
     print(args)
 
@@ -155,17 +136,18 @@ def main():
     model.to(device)
 
     train_dataset = load_squad_dataset(args.train_dataset,using_pickle=args.using_cache)
-    old_dataset = load_squad_dataset(args.old_dataset,using_pickle=args.using_cache)
-    dataset = (train_dataset,old_dataset)
+    if args.do_LLL != "":
+        old_dataset = load_squad_dataset(args.old_dataset,using_pickle=args.using_cache)
+        dataset = (train_dataset,old_dataset)
+    else:
+        dataset=(train_dataset,)
+
     def tokenize_and_encode(obj):
         """ Tokenize and encode a nested object """
         if isinstance(obj, str):
-            # print(obj)
             return tokenizer.convert_tokens_to_ids(tokenizer.tokenize(obj))
         elif isinstance(obj, set):
-            # print(obj)
             return obj
-        # print(obj)
         return list(tokenize_and_encode(o) for o in obj)
         
     encoded_datasets = tokenize_and_encode(dataset)
@@ -177,13 +159,13 @@ def main():
     input_length = min(input_length, model.config.n_positions)  # Max size of input for the pre-trained model
     tensor_datasets = pre_process_datasets(encoded_datasets, input_length,*special_tokens_ids)
     train_data = TensorDataset(*tensor_datasets[0])
-    old_data = TensorDataset(*tensor_datasets[1])
+    if args.do_LLL !="":
+        old_data = TensorDataset(*tensor_datasets[1])
+        old_sampler = RandomSampler(old_data)
+        old_dataloader = DataLoader(old_data,sampler=old_sampler,batch_size= args.old_batch_size)
     train_sampler = RandomSampler(train_data)
-    old_sampler = RandomSampler(old_data)
     train_dataloader = DataLoader(train_data, sampler=train_sampler, batch_size=args.train_batch_size)
-    old_dataloader = DataLoader(old_data,sampler=old_sampler,batch_size= args.old_batch_size)
-    # pdb.set_trace()
-
+    
     if args.do_train:
         param_optimizer = list(model.named_parameters())
         no_decay = ['bias', 'LayerNorm.bias', 'LayerNorm.weight']
@@ -195,13 +177,22 @@ def main():
         optimizer = AdamW(optimizer_grouped_parameters, lr=args.learning_rate, eps=args.adam_epsilon)
         scheduler = WarmupLinearSchedule(optimizer, warmup_steps=args.warmup_steps, t_total=num_train_optimization_steps)
 
+    if args.fp16:
+        try:
+            from apex import amp
+        except ImportError:
+            raise ImportError("Please install apex from https://www.github.com/nvidia/apex to use fp16 training.")
+        model, optimizer = amp.initialize(model, optimizer, opt_level=args.fp16_opt_level)
+
+
+
     if args.do_train:
         writer = SummaryWriter(args.output_dir+"/tensorboard/")
         nb_tr_steps, tr_loss, exp_average_loss = 0, 0, None
         model.train()
         if args.do_LLL != "":
             importance = args.importance
-            Reg = Regularization(model=model,mode="EWC",dataloader=old_dataloader,device=device,optimizer=optimizer,args=args)
+            Reg = Regularization(model=model,mode="EWC",dataloader=old_dataloader,device=device,optimizer=optimizer)
         step_step = 1
         for _ in trange(int(args.num_train_epochs), desc="Epoch"):
             tr_loss = 0
@@ -215,7 +206,15 @@ def main():
                     loss = losses[0] + importance * Reg.penalty(model)
                 else:
                     loss = losses[0]
-                loss.backward()
+                if args.fp16:
+                    
+                    with amp.scale_loss(loss, optimizer) as scaled_loss:
+                        scaled_loss.backward()
+                    torch.nn.utils.clip_grad_norm_(model.parameters(), args.max_grad_norm)
+                else:
+                    loss.backward()
+                    torch.nn.utils.clip_grad_norm_(model.parameters(), args.max_grad_norm)
+                    
                 optimizer.step()
                 scheduler.step()
                 writer.add_scalar('training_loss',loss,step_step)
@@ -237,7 +236,6 @@ def main():
         model_to_save.config.to_json_file(output_config_file)
         tokenizer.save_pretrained(args.output_dir)
         tokenizer.save_vocabulary(args.output_dir)
-
         # Load a trained model and vocabulary that you have fine-tuned
         model = OpenAIGPTLMHeadModel.from_pretrained(args.output_dir)
         tokenizer = OpenAIGPTTokenizer.from_pretrained(args.output_dir)
