@@ -58,11 +58,13 @@ coverage.xml
 *.bin
 *.json
 *.p
-
+*.txt
 # Django stuff:
 *.log
 local_settings.py
 db.sqlite3
+
+*.speech
 
 # Flask stuff:
 instance/
