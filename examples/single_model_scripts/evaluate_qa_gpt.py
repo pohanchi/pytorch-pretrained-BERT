@@ -32,6 +32,22 @@ def longest_length(model):
     a_length = 50
     return max_length, q_length, a_length
 
+def load_tool(model_name,special_tokens,device):
+    load_dir = model_name
+    tokenizer = GPT2Tokenizer.from_pretrained(load_dir)
+    model = GPT2LMHeadModel.from_pretrained(load_dir)
+    model.to(device)
+    special_tokens_ids = list(
+    tokenizer.convert_tokens_to_ids(token) for token in special_tokens)
+    return load_dir, tokenizer, model, special_tokens_ids
+
+def set_seed(seed):
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    torch.cuda.manual_seed_all(seed)
+    return
+
 
 def top_k_top_p_filtering(logits,
                           top_k=0,
@@ -66,14 +82,9 @@ def top_k_top_p_filtering(logits,
         sorted_indices_to_remove[..., 1:] = sorted_indices_to_remove[
             ..., :-1].clone()
         sorted_indices_to_remove[..., 0] = 0
-        
-        
         indices_to_remove = sorted_indices[sorted_indices_to_remove]
         row_index = (sorted_indices_to_remove == 1).nonzero()[:,0]
-        # indices_to_remove = torch.zeros_like(logits, dtype=torch.uint8).scatter_(
-        #     dim=-1, index=sorted_indices.to(device), src=sorted_indices_to_remove.byte())
         logits[row_index,indices_to_remove] = filter_value
-        # logits[indices_to_remove] = filter_value
     return logits
 
 
@@ -85,43 +96,49 @@ def sample_sequence(model,
                     top_k=0,
                     top_p=0.9,
                     is_xlnet=False,
-                    device='cpu'):
-    # context = context.clone().detach()
-
-    # context = context.unsqueeze(0).repeat(num_samples, 1)
-
+                    device='cpu',argmax=False):
     generated = context.clone().detach()
+    generated = generated.unsqueeze(0)
     with torch.no_grad():
         end_token = "_eos_"
         end_word = tokenizer.convert_tokens_to_ids(end_token)
         next_token = "_none_"
         start_time = time.time()
         past = None
-        for i in range(20):
-            # inputs = {'input_ids': generated,'past':past}
-            # IPython.embed()
+        count = 0
+        while next_token != end_word:
             output,past = model(generated)
             
             next_token_logits = output[:, -1, :] / temperature
             
-            # start_m_time = time.time()
-
-            filtered_logits = top_k_top_p_filtering(
-                next_token_logits, top_k=top_k, top_p=top_p,device=device)
-            # end_m_time = time.time()
-            # print("It took {} seconds".format(end_m_time-start_m_time))
-            next_token = torch.multinomial(
-                F.softmax(filtered_logits, dim=-1), num_samples=1)
-            # IPython.embed()
-            # pdb.set_trace()
-            # new_words = next_token
-            if i > 0:
-                next_token_matrix = torch.cat((next_token_matrix,next_token),dim=1)
+            if not argmax:
+                filtered_logits = top_k_top_p_filtering(
+                    next_token_logits, top_k=top_k, top_p=top_p,device=device)
+                next_tokens = torch.multinomial(
+                    F.softmax(filtered_logits, dim=-1), num_samples=num_samples,replacement=True)
+                next_tokens_output=torch.mode(next_tokens, dim=-1, keepdim=True)
+                next_token=next_tokens_output[0]
+                
             else:
-                next_token_matrix = next_token
+                next_token = torch.argmax(next_token_logits,keepdim=True,dim=-1)
+                # IPython.embed()
+                # pdb.set_trace()
+            if count > 0:
+                if next_token != end_word:
+                    next_token_matrix = torch.cat((next_token_matrix,next_token),dim=1)
+            else:
+                if next_token != end_word:
+                    next_token_matrix = next_token
+            if next_token==end_word and count==0:
+                return torch.tensor([[]])
+
+            if count >=35:
+                break
+
             generated = torch.cat((generated, next_token), dim=1)
+            count += 1
         end_time = time.time()
-        print("It took {} seconds".format(end_time-start_time))
+        # print("It took {} seconds".format(end_time-start_time))
 
     return next_token_matrix
 
@@ -171,21 +188,26 @@ def pre_process_datasets(datasets,input_len,story_token,question_token,ans_token
     a_length = 50
     for dataset in datasets:
         n_batch = len(dataset)
-        input_ids = np.zeros((n_batch, input_len), dtype=np.int64)
-        answer_span = np.zeros((n_batch, a_length), dtype=np.int64)
         ID_list = list()
+        input_ids = np.zeros((n_batch,input_len))
+        answer_span = np.zeros((n_batch,a_length))
         ID_indexes = np.zeros((n_batch, 1),dtype='int64')
         for i, (story, question, ans, ID), in enumerate(dataset):
-            cannot_calculate_loss = len([story_token] + story + [question_token] + question + [ans_token])
             text=[story_token] + story + [question_token] + question + [ans_token]
             only_need_length = len(text)
-            input_ids[i,:only_need_length] = text
+            input_ids[i,:only_need_length] = text 
             input_ids[i,only_need_length:] = pad_token
             answer_span[i, :len(ans)] = ans
+            answer_span[i,len(ans):] = pad_token
             ID_indexes[i, 0] = i
             ID_list.append(list(ID)[0])
+            # IPython.embed()
+            # pdb.set_trace()
         all_inputs = (input_ids, answer_span, ID_indexes)
+        # print(len(input_list),len(answer_list),len(ID_indexes))
+        # IPython.embed()
         tensor_datasets.append(tuple(torch.tensor(t) for t in all_inputs))
+        
     return tensor_datasets, ID_list
 
 
@@ -212,9 +234,11 @@ def main():
         help=
         "The output directory where the model predictions and checkpoints will be written."
     )
+    # parser.add_argument("--old_dataset", type=str, default="")
     parser.add_argument('--eval_dataset', type=str, default='')
     parser.add_argument('--seed', type=int, default=42)
     parser.add_argument('--eval_batch_size', type=int, default=8)
+    # parser.add_argument('--old_batch_size', type=int, default=1)
     parser.add_argument("--length", type=int, default=20)
     parser.add_argument("--temperature", type=float, default=1.0)
     parser.add_argument("--top_k", type=int, default=8)
@@ -232,18 +256,16 @@ def main():
         help="Number of updates steps to accumulate before\
                         performing a backward/update pass.")
     parser.add_argument("--no_cuda",action="store_true")
+    parser.add_argument("--argmax",action="store_true")
+    parser.add_argument("--sample",type=int,default=1)
     args = parser.parse_args()
 
     args.device = torch.device(
         "cuda:0" if torch.cuda.is_available() and not args.no_cuda else "cpu")
     args.n_gpu = torch.cuda.device_count()
     print(args)
-
-    random.seed(args.seed)
-    np.random.seed(args.seed)
-    torch.manual_seed(args.seed)
-    torch.cuda.manual_seed_all(args.seed)
-    device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
+    set_seed(args.seed)
+    device=args.device
     n_gpu = torch.cuda.device_count()
     logger.info("device: {}, n_gpu {}".format(device, n_gpu))
 
@@ -254,12 +276,7 @@ def main():
         os.makedirs(args.output_dir)
 
     special_tokens = ['_context_', '_question_', '_ans_','_eos_','_pad_']
-    load_dir = args.model_name
-    tokenizer = GPT2Tokenizer.from_pretrained(load_dir)
-    model = GPT2LMHeadModel.from_pretrained(load_dir)
-    model.to(device)
-    special_tokens_ids = list(
-        tokenizer.convert_tokens_to_ids(token) for token in special_tokens)
+    load_dir, tokenizer, model, special_tokens_ids = load_tool(args.model_name,special_tokens,device)
     print(special_tokens_ids)
 
     def tokenize_and_encode(obj):
@@ -278,9 +295,9 @@ def main():
     encoded_datasets = tokenize_and_encode(datasets)
     max_length, q_length, a_length = longest_length(model)
 
-    input_length = max(len(story[:max_length]) + len(question[:q_length]) + len(ans[:a_length]) + 5  \
+    input_length = max(len(story[:max_length]) + len(question[:q_length])  + 5  \
                             for dataset in encoded_datasets for story, question, ans, _ in dataset)
-    input_length = min(input_length, model.config.n_positions) 
+    input_length = min(input_length, model.config.n_positions-2) 
 
     # Load and encode the datasets
 
@@ -288,41 +305,52 @@ def main():
     tensor_datasets, ID_list = pre_process_datasets(encoded_datasets, input_length,*special_tokens_ids)
     eval_data = TensorDataset(*tensor_datasets[0])
     eval_sampler = SequentialSampler(eval_data)
-    eval_sampler=BatchSampler(eval_sampler,batch_size=args.eval_batch_size,drop_last=True)
+    eval_sampler=BatchSampler(eval_sampler,batch_size=args.eval_batch_size,drop_last=False)
     eval_dataloader = DataLoader(eval_data, sampler=eval_sampler,num_workers=8)
 
     if args.do_eval:
         model.eval()
         answer_dict = dict()
+        compared_dict = dict()
         tqdm_bar = tqdm(eval_dataloader, desc="Evaluating")
         for step, data in enumerate(tqdm_bar):
             start_time = time.time()
             sentence, answer, ID_index = tuple(t.to(device) for t in data)
-            
-            # IPython.embed()
-            # print(ID_index)
+            sentence = sentence[sentence != special_tokens_ids[4]].long()
+            answer = answer[answer != special_tokens_ids[4]].long()
+            # print(answer)
+            # pdb.set_trace()
             out = sample_sequence(
                 model=model,
-                context=sentence[0],
+                context=sentence,
                 temperature=args.temperature,
                 top_k=args.top_k,
                 top_p=args.top_p,
                 device=args.device,
                 is_xlnet=False,
-                tokenizer=tokenizer)
-            # print(len(sentence[0]))
+                tokenizer=tokenizer,
+                argmax=args.argmax,num_samples=args.sample)
+            
             end_time = time.time()
-            # ID_index.data()
             
-            print("It costs {} seconds for generate data!!".format(end_time-start_time))
+            # print("It costs {} seconds for generate data!!".format(end_time-start_time))
             out_ = out[:, :].tolist()
-            
+            answer_ = tokenizer.decode(answer.tolist(),clean_up_tokenization_spaces=True)
             for i in range(len(out_)):
                 text = tokenizer.decode(out_[i], clean_up_tokenization_spaces=True,skip_special_tokens=True)
                 answer_dict[ID_list[ID_index[0][i]]] = text
-            print(text)
+                compared_dict[ID_list[ID_index[0][i]]] = (text,answer_)
+                
+            if step % 50 == 0:
+                print("step:", step)
+                print("  prediction: ",text)
+                print("  groundtrut: ",answer_)
+                
+
         with open(args.output_dir + "/predictions.json", "w") as outfile:
-            json.dumps(answer_dict, outfile)
+            json.dump(answer_dict, outfile)
+        with open(args.output_dir + "/compared_answer.json","w") as outfile:
+            json.dump(compared_dict, outfile)
     return
 
 if __name__ == '__main__':
