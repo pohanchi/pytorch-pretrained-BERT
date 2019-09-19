@@ -17,6 +17,6 @@ if __name__ == "__main__":
             subprocess.call(["python", "./evaluate_qa_gpt.py","--model_name",args.model_file,"--eval_dataset",args.data_file,"--do_eval","--output_dir","./eval_2/"+args.output_dir+"/test"+args.version+"/normal","--eval_batch_size","1", "--sample","1",])
             subprocess.call(["python","../utils_squad_evaluate.py",args.data_file,"./eval_2/"+args.output_dir+"/test"+args.version+"/normal"+"/predictions.json","-o","./eval_2/"+args.output_dir+"/test"+args.version+"/normal"+"/eval.json"])
         if m == "sample10":
-            subprocess.call(["python", "./evaluate_qa_gpt.py","--model_name",args.model_file,"--eval_dataset",args.data_file,"--output_dir","./eval_2/"+args.output_dir+"/test"+args.version+"/sample10","--eval_batch_size","1", "--sample","10",])
+            subprocess.call(["python", "./evaluate_qa_gpt.py","--model_name",args.model_file,"--eval_dataset",args.data_file,"--do_eval","--output_dir","./eval_2/"+args.output_dir+"/test"+args.version+"/sample10","--eval_batch_size","1", "--sample","10",])
             subprocess.call(["python","../utils_squad_evaluate.py",args.data_file,"./eval_2/"+args.output_dir+"/test"+args.version+"/sample10"+"/predictions.json","-o","./eval_2/"+args.output_dir+"/test"+args.version+"/sample10"+"/eval.json"])
 

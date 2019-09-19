@@ -49,7 +49,7 @@ def load_squad_dataset(path, cache=True,using_pickle=False):
                         if qas['is_impossible'] == False:
                             answer = qas['answers'][0]['text']
                         else:
-                            answer = " "
+                            answer = ""
                     except:
                         answer = qas['answers'][0]['text']
                     data_list+=[(context, question, answer, {ID})]

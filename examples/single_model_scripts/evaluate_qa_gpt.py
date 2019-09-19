@@ -107,9 +107,9 @@ def sample_sequence(model,
         past = None
         count = 0
         while next_token != end_word:
-            output,past = model(generated)
+            output = model(generated)
             
-            next_token_logits = output[:, -1, :] / temperature
+            next_token_logits = output[0][:, -1, :] / temperature
             
             if not argmax:
                 filtered_logits = top_k_top_p_filtering(
@@ -219,10 +219,6 @@ def main():
         type=str,
         default='gpt2',
         help='pretrained model name')
-    parser.add_argument(
-        "--do_eval",
-        action='store_true',
-        help="Whether to run eval on the dev set.")
     parser.add_argument("--using_cache", type=bool, default=False)
     parser.add_argument(
         "--importance", type=float, help="LifeLong Learning need its (Lambda)")
@@ -234,6 +230,7 @@ def main():
         help=
         "The output directory where the model predictions and checkpoints will be written."
     )
+    parser.add_argument("--do_eval",action="store_true")
     # parser.add_argument("--old_dataset", type=str, default="")
     parser.add_argument('--eval_dataset', type=str, default='')
     parser.add_argument('--seed', type=int, default=42)
