@@ -135,3 +135,7 @@ proc_data
 # examples
 runs
 examples/runs
+examples/single_model_scripts/gpt-2-1.1_LLL_ewc_f2.0_importance_10/tensorboard/events.out.tfevents.1568684724.s11.speech
+examples/single_model_scripts/gpt-2-1.1_LLL_ewc_f2.0_importance_10/tensorboard/events.out.tfevents.1568684724.s11.speech
+squad_like/squad-train-v1.1.json_bert-base-uncased_256_64_16
+squad_like/squad-train-v1.1.json_bert-base-uncased_384_128_64
